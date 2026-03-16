@@ -140,6 +140,7 @@ io.on('connection', (socket) => {
       currentGuesserIdx: 0,
       cardPlaced:        false,
       placedPosition:    null,
+      pendingCorrect:    null,
       histerCallerId:    null,
     };
     rooms.set(code, room);
@@ -209,11 +210,22 @@ io.on('connection', (socket) => {
     if (!room) return;
     const guesser = room.players[room.currentGuesserIdx % room.players.length];
     if (socket.id !== guesser?.id) return;
-    room.cardPlaced      = true;
-    room.placedPosition  = position;
-    room.histerCallerId  = null;
+
+    // Calcul automatique : correct si l'année s'insère bien entre les voisins
+    const timeline = guesser.timeline;
+    const card     = room.currentCard;
+    const year     = card?.year ?? 0;
+    const before   = timeline[position - 1];
+    const after    = timeline[position];
+    const isCorrect = (!before || year >= before.year) && (!after || year <= after.year);
+
+    room.cardPlaced     = true;
+    room.placedPosition = position;
+    room.pendingCorrect = isCorrect;
+    room.histerCallerId = null;
+
     io.to(code).emit('card-placed', { guesserId: guesser.id, position });
-    console.log(`${guesser.name} a placé sa carte à la position ${position}`);
+    console.log(`${guesser.name} a placé sa carte à la position ${position} — ${isCorrect ? '✅' : '❌'}`);
   });
 
   // Un non-devinant dit "Hister !"
@@ -229,27 +241,39 @@ io.on('connection', (socket) => {
     console.log(`HISTER ! par ${caller?.name}`);
   });
 
-  // L'hôte valide le résultat (correct ou non)
-  socket.on('resolve-turn', ({ code, correct }) => {
+  // Le devinant révèle l'année — résolution automatique
+  socket.on('reveal-result', ({ code }) => {
     const room = rooms.get(code);
-    if (!room || room.hostId !== socket.id) return;
-    const guesserIdx = room.currentGuesserIdx % room.players.length;
-    const guesser    = room.players[guesserIdx];
+    if (!room) return;
+    const guesserIdx  = room.currentGuesserIdx % room.players.length;
+    const guesser     = room.players[guesserIdx];
+    if (socket.id !== guesser?.id) return; // seul le devinant peut révéler
+
+    const correct      = room.pendingCorrect ?? false;
+    const histerCaller = room.histerCallerId
+      ? room.players.find(p => p.id === room.histerCallerId)
+      : null;
+    const card = room.currentCard;
 
     if (correct) {
-      // Correct : la carte s'ajoute à la frise du devinant
+      // Bon placement : carte dans la frise du devinant
       guesser.cards += 1;
-      if (room.currentCard) {
-        // Insérer à la bonne position dans la frise triée
-        guesser.timeline.push(room.currentCard);
-        guesser.timeline.sort((a, b) => a.year - b.year);
-      }
+      if (card) { guesser.timeline.push(card); guesser.timeline.sort((a, b) => a.year - b.year); }
+      // Hister appelé mais c'était correct → caller perd un jeton
+      if (histerCaller) histerCaller.tokens = Math.max(0, histerCaller.tokens - 1);
     } else {
-      // Faux : le devinant perd un jeton
+      // Mauvais placement
       guesser.tokens = Math.max(0, guesser.tokens - 1);
+      if (histerCaller && card) {
+        // Hister correct → le caller gagne la carte dans sa frise
+        histerCaller.cards += 1;
+        histerCaller.timeline.push(card);
+        histerCaller.timeline.sort((a, b) => a.year - b.year);
+      }
     }
 
-    if (guesser.cards >= room.targetCards) room.winnerId = guesser.id;
+    if (guesser.cards >= room.targetCards)       room.winnerId = guesser.id;
+    if (histerCaller && histerCaller.cards >= room.targetCards) room.winnerId = histerCaller.id;
 
     io.to(code).emit('turn-resolved', {
       correct,
@@ -258,7 +282,7 @@ io.on('connection', (socket) => {
       guesserId:      guesser.id,
       histerCallerId: room.histerCallerId,
     });
-    console.log(`Tour résolu — ${correct ? '✅ Correct' : '❌ Faux'}`);
+    console.log(`Révélation — ${correct ? '✅ Correct' : '❌ Faux'}${histerCaller ? ` | Hister par ${histerCaller.name}` : ''}`);
   });
 
   socket.on('next-turn', ({ code }) => {
@@ -268,6 +292,7 @@ io.on('connection', (socket) => {
     room.currentCard   = null;
     room.cardPlaced     = false;
     room.placedPosition = null;
+    room.pendingCorrect = null;
     room.histerCallerId = null;
     const guesser = room.players[room.currentGuesserIdx];
     io.to(code).emit('turn-changed', { guesserId: guesser?.id ?? null });
