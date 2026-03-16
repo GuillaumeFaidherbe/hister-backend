@@ -188,6 +188,8 @@ io.on('connection', (socket) => {
     room.placedPosition    = null;
     room.pendingCorrect    = null;
     room.histerCallerId    = null;
+    // Émet room-updated avec les timelines à jour AVANT initial-cards
+    io.to(code).emit('room-updated', room);
     io.to(code).emit('initial-cards', {
       cards: initialCards,
       firstGuesserId: room.players[lowestYearIdx]?.id ?? null,
@@ -273,8 +275,7 @@ io.on('connection', (socket) => {
       // Hister appelé mais c'était correct → caller perd un jeton
       if (histerCaller) histerCaller.tokens = Math.max(0, histerCaller.tokens - 1);
     } else {
-      // Mauvais placement
-      guesser.tokens = Math.max(0, guesser.tokens - 1);
+      // Mauvais placement : la carte est juste perdue (pas de jeton perdu)
       if (histerCaller && card) {
         // Hister correct → le caller gagne la carte dans sa frise
         histerCaller.cards += 1;
