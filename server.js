@@ -11,47 +11,22 @@ const io     = new Server(server, { cors: { origin: '*' } });
 app.use(cors());
 app.use(express.json());
 
-// ─── Spotify ──────────────────────────────────────────────────────────────────
-
-const SPOTIFY_CLIENT_ID     = '37437f33822e41bbbccdfcd1dd14807f';
-const SPOTIFY_CLIENT_SECRET = 'acf141ff19c14362ba5f938380628239';
-
-let spotifyToken = null;
-let tokenExpiry  = 0;
-
-async function getSpotifyToken() {
-  if (spotifyToken && Date.now() < tokenExpiry) return spotifyToken;
-  const creds = Buffer.from(`${SPOTIFY_CLIENT_ID}:${SPOTIFY_CLIENT_SECRET}`).toString('base64');
-  const res = await fetch('https://accounts.spotify.com/api/token', {
-    method: 'POST',
-    headers: { 'Authorization': `Basic ${creds}`, 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: 'grant_type=client_credentials',
-  });
-  const data = await res.json();
-  if (!data.access_token) throw new Error('Spotify token error: ' + JSON.stringify(data));
-  spotifyToken = data.access_token;
-  tokenExpiry  = Date.now() + (data.expires_in - 60) * 1000;
-  console.log('🎵 Spotify token rafraîchi');
-  return spotifyToken;
-}
-
-// ─── Artistes français par décennie ──────────────────────────────────────────
+// ─── iTunes Search API (gratuit, sans auth, previews garantis) ────────────────
 
 const FRENCH_ARTISTS_BY_DECADE = {
   1950: ['Edith Piaf', 'Yves Montand', 'Charles Trenet', 'Henri Salvador', 'Juliette Gréco', 'Charles Aznavour', 'Gilbert Bécaud', 'Léo Ferré'],
   1960: ['Jacques Brel', 'Serge Gainsbourg', 'Françoise Hardy', 'Dalida', 'Claude François', 'Antoine', 'Sacha Distel', 'Michel Polnareff', 'Sylvie Vartan', 'Johnny Hallyday', 'Adamo'],
-  1970: ['Joe Dassin', 'Michel Sardou', 'Julien Clerc', 'Alain Souchon', 'Véronique Sanson', 'Gérard Lenorman', 'Claude François', 'Carlos', 'Michel Delpech', 'Daniel Guichard'],
-  1980: ['Jean-Jacques Goldman', 'Francis Cabrel', 'Renaud', 'Patricia Kaas', 'Mylène Farmer', 'Indochine', 'Téléphone', 'Étienne Daho', 'Goldman', 'Alain Barrière', 'Herbert Léonard'],
-  1990: ['Céline Dion', 'Lara Fabian', 'Vanessa Paradis', 'Patrick Bruel', 'MC Solaar', 'IAM', 'NTM', 'Akhénaton', 'Zazie', 'Pascal Obispo', 'Grégory Lemarchal', 'M Pokora'],
-  2000: ['Christophe Maé', 'Corneille', 'Amel Bent', 'Kamel', 'Raphael', 'Tété', 'Gaëtan Roussel', 'Calogero', 'Kyo', 'Dionysos', 'Les Wampas', 'Olivia Ruiz'],
-  2010: ['Stromae', 'Maître Gims', 'Black M', 'Soprano', 'Kendji Girac', 'Louane', 'Vianney', 'Slimane', 'Julien Doré', 'Christophe Willem', 'Carla Bruni', 'Camille', 'Zaz'],
-  2020: ['Aya Nakamura', 'Ninho', 'Tayc', 'Soolking', 'Naps', 'Hatik', 'Gims', 'Slimane', 'Lous and The Yakuza', 'Pomme', 'Angèle', 'Lomepal', 'Orelsan'],
+  1970: ['Joe Dassin', 'Michel Sardou', 'Julien Clerc', 'Alain Souchon', 'Véronique Sanson', 'Gérard Lenorman', 'Carlos', 'Michel Delpech', 'Daniel Guichard'],
+  1980: ['Jean-Jacques Goldman', 'Francis Cabrel', 'Renaud', 'Patricia Kaas', 'Mylène Farmer', 'Indochine', 'Téléphone', 'Étienne Daho', 'Vanessa Paradis', 'Herbert Léonard'],
+  1990: ['Céline Dion', 'Lara Fabian', 'Patrick Bruel', 'MC Solaar', 'IAM', 'NTM', 'Zazie', 'Pascal Obispo', 'M Pokora', 'Calogero'],
+  2000: ['Christophe Maé', 'Corneille', 'Amel Bent', 'Raphael', 'Gaëtan Roussel', 'Kyo', 'Dionysos', 'Olivia Ruiz'],
+  2010: ['Stromae', 'Maître Gims', 'Black M', 'Soprano', 'Kendji Girac', 'Louane', 'Vianney', 'Slimane', 'Julien Doré', 'Zaz', 'Lomepal', 'Orelsan'],
+  2020: ['Aya Nakamura', 'Ninho', 'Tayc', 'Soolking', 'Naps', 'Hatik', 'Gims', 'Pomme', 'Angèle', 'Lous and The Yakuza'],
 };
 
 const ALL_DECADES = Object.keys(FRENCH_ARTISTS_BY_DECADE).map(Number).sort((a, b) => a - b);
 
 function pickArtistForYear(targetYear) {
-  // Trouve la décennie la plus proche
   let best = ALL_DECADES[0];
   for (const d of ALL_DECADES) {
     if (targetYear >= d) best = d;
@@ -65,71 +40,56 @@ function rand(arr) {
   return arr[Math.floor(Math.random() * arr.length)];
 }
 
+function buildCard(track, fallbackYear) {
+  const year = track.releaseDate ? parseInt(track.releaseDate.substring(0, 4)) : fallbackYear;
+  const cover = track.artworkUrl100
+    ? track.artworkUrl100.replace('100x100bb', '300x300bb').replace('100x100', '300x300')
+    : null;
+  return {
+    id:          `${Date.now()}`,
+    year:        isNaN(year) ? fallbackYear : year,
+    title:       track.trackName ?? null,
+    artist:      track.artistName ?? null,
+    previewUrl:  track.previewUrl ?? null,
+    albumCover:  cover,
+    spotifyUri:  null,
+    spotifyUrl:  track.trackViewUrl ?? null,  // lien Apple Music
+  };
+}
+
 async function fetchCard(targetYear) {
-  const year = targetYear || (1950 + Math.floor(Math.random() * 77)); // 1950–2026
-  const token = await getSpotifyToken();
-
+  const year   = targetYear || (1950 + Math.floor(Math.random() * 77));
   const artist = pickArtistForYear(year);
-  try {
-    const q = encodeURIComponent(artist);
-    const res = await fetch(
-      `https://api.spotify.com/v1/search?q=${q}&type=track&market=FR&limit=50`,
-      { headers: { Authorization: `Bearer ${token}` } }
-    );
-    const data = await res.json();
 
-    // Filtrer : lien Spotify présent + pas de compilation (années souvent fausses)
-    const tracks = (data.tracks?.items ?? []).filter(t =>
-      t.external_urls?.spotify &&
-      t.album?.album_type !== 'compilation'
-    );
+  try {
+    const url  = `https://itunes.apple.com/search?term=${encodeURIComponent(artist)}&country=FR&media=music&entity=song&limit=50`;
+    const res  = await fetch(url);
+    const data = await res.json();
+    const tracks = (data.results ?? []).filter(t => t.previewUrl && t.trackName);
 
     if (tracks.length > 0) {
-      const t = rand(tracks);
-      const actualYear = parseInt(t.album?.release_date?.substring(0, 4)) || year;
-      return buildCard(t, actualYear);
+      console.log(`🎵 iTunes: ${artist} → ${tracks.length} titres`);
+      return buildCard(rand(tracks), year);
     }
   } catch (e) {
-    console.error('Spotify artist search error:', e.message);
+    console.error('iTunes search error:', e.message);
   }
 
-  // Fallback avec artiste populaire garanti
+  // Fallback artiste populaire garanti
   try {
     const fallback = rand(['Stromae', 'Aya Nakamura', 'Francis Cabrel', 'Jean-Jacques Goldman',
-      'Edith Piaf', 'Serge Gainsbourg', 'Mylène Farmer', 'Patrick Bruel',
+      'Edith Piaf', 'Mylène Farmer', 'Patrick Bruel', 'Serge Gainsbourg',
       'Vanessa Paradis', 'Michel Sardou', 'Dalida', 'Johnny Hallyday']);
-    const q2 = encodeURIComponent(fallback);
-    const res2 = await fetch(
-      `https://api.spotify.com/v1/search?q=${q2}&type=track&market=FR&limit=20`,
-      { headers: { Authorization: `Bearer ${token}` } }
-    );
+    const url2  = `https://itunes.apple.com/search?term=${encodeURIComponent(fallback)}&country=FR&media=music&entity=song&limit=25`;
+    const res2  = await fetch(url2);
     const data2 = await res2.json();
-    const tracks2 = (data2.tracks?.items ?? []).filter(t =>
-      t.external_urls?.spotify && t.album?.album_type !== 'compilation'
-    );
-    if (tracks2.length > 0) {
-      const t = rand(tracks2);
-      const actualYear = parseInt(t.album?.release_date?.substring(0, 4)) || year;
-      return buildCard(t, actualYear);
-    }
+    const tracks2 = (data2.results ?? []).filter(t => t.previewUrl && t.trackName);
+    if (tracks2.length > 0) return buildCard(rand(tracks2), year);
   } catch (e) {
-    console.error('Spotify fallback error:', e.message);
+    console.error('iTunes fallback error:', e.message);
   }
 
   return { id: `${Date.now()}`, year, title: null, artist: null, previewUrl: null, albumCover: null, spotifyUri: null, spotifyUrl: null };
-}
-
-function buildCard(track, year) {
-  return {
-    id:          `${Date.now()}`,
-    year,
-    title:       track.name,
-    artist:      track.artists.map(a => a.name).join(', '),
-    previewUrl:  track.preview_url ?? null,        // null pour les nouvelles apps Spotify
-    albumCover:  track.album?.images?.[1]?.url ?? track.album?.images?.[0]?.url ?? null,
-    spotifyUri:  track.uri ?? null,                // ex: spotify:track:XXXXXX
-    spotifyUrl:  track.external_urls?.spotify ?? null, // ex: https://open.spotify.com/track/XXXXX
-  };
 }
 
 // ─── HTTP ─────────────────────────────────────────────────────────────────────
