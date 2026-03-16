@@ -164,33 +164,44 @@ io.on('connection', (socket) => {
     console.log(`${playerName} a rejoint la salle ${code}`);
   });
 
+  async function dealInitialCards(room) {
+    const code = room.code;
+    const initialCards = [];
+    let lowestYear = Infinity;
+    let lowestYearIdx = 0;
+    for (let i = 0; i < room.players.length; i++) {
+      room.players[i].tokens   = 2;
+      room.players[i].cards    = 1;
+      room.players[i].timeline = [];
+      const card = await fetchCard();
+      room.players[i].timeline.push(card);
+      initialCards.push({ playerId: room.players[i].id, card });
+      if ((card.year ?? 9999) < lowestYear) {
+        lowestYear    = card.year ?? 9999;
+        lowestYearIdx = i;
+      }
+    }
+    room.currentGuesserIdx = lowestYearIdx;
+    room.winnerId          = null;
+    room.currentCard       = null;
+    room.cardPlaced        = false;
+    room.placedPosition    = null;
+    room.pendingCorrect    = null;
+    room.histerCallerId    = null;
+    io.to(code).emit('initial-cards', {
+      cards: initialCards,
+      firstGuesserId: room.players[lowestYearIdx]?.id ?? null,
+    });
+    console.log(`Cartes initiales distribuées — Premier devinant: ${room.players[lowestYearIdx]?.name} (${lowestYear})`);
+  }
+
   socket.on('start-game', async ({ code, targetCards }) => {
     const room = rooms.get(code);
     if (!room || room.hostId !== socket.id) return;
     room.gameStarted = true;
     room.targetCards = targetCards || 10;
-
-    // Tire une carte initiale par joueur, remet les jetons à 2
-    const initialCards = [];
-    let lowestYear = Infinity;
-    let lowestYearIdx = 0;
-    for (let i = 0; i < room.players.length; i++) {
-      room.players[i].tokens = 2;
-      const card = await fetchCard();
-      initialCards.push({ playerId: room.players[i].id, card });
-      if ((card.year ?? 9999) < lowestYear) {
-        lowestYear = card.year ?? 9999;
-        lowestYearIdx = i;
-      }
-    }
-    room.currentGuesserIdx = lowestYearIdx;
-
     io.to(code).emit('game-started', room);
-    io.to(code).emit('initial-cards', {
-      cards: initialCards,
-      firstGuesserId: room.players[lowestYearIdx]?.id ?? null,
-    });
-    console.log(`Partie démarrée — Premier devinant: ${room.players[lowestYearIdx]?.name} (${lowestYear})`);
+    await dealInitialCards(room);
   });
 
   socket.on('draw-card', async ({ code, year }) => {
@@ -310,19 +321,12 @@ io.on('connection', (socket) => {
     io.to(code).emit('scores-updated', { players: room.players, winnerId: room.winnerId });
   });
 
-  socket.on('reset-scores', ({ code }) => {
+  socket.on('reset-scores', async ({ code }) => {
     const room = rooms.get(code);
     if (!room || room.hostId !== socket.id) return;
-    room.players.forEach(p => { p.cards = 0; p.tokens = 2; p.timeline = []; });
-    room.winnerId          = null;
-    room.currentCard       = null;
-    room.currentGuesserIdx = 0;
-    room.cardPlaced        = false;
-    room.placedPosition    = null;
-    room.histerCallerId    = null;
-    const guesser = room.players[0];
-    io.to(code).emit('scores-updated', { players: room.players, winnerId: null });
-    io.to(code).emit('card-drawn', { card: null, guesserId: guesser?.id ?? null });
+    io.to(code).emit('game-started', room);
+    await dealInitialCards(room);
+    console.log(`Partie relancée dans la salle ${code}`);
   });
 
   socket.on('disconnect', () => {
