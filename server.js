@@ -197,12 +197,17 @@ io.on('connection', (socket) => {
     console.log(`${playerName} a rejoint la salle ${code}`);
   });
 
-  socket.on('start-game', ({ code, targetCards }) => {
+  socket.on('start-game', async ({ code, targetCards }) => {
     const room = rooms.get(code);
     if (!room || room.hostId !== socket.id) return;
     room.gameStarted = true;
     room.targetCards = targetCards || 10;
     io.to(code).emit('game-started', room);
+    // Tire la première carte automatiquement
+    const card = await fetchCard();
+    room.currentCard = card;
+    const guesser = room.players[room.currentGuesserIdx % room.players.length];
+    io.to(code).emit('card-drawn', { card, guesserId: guesser?.id ?? null });
   });
 
   socket.on('draw-card', async ({ code, year }) => {
