@@ -169,7 +169,7 @@ io.on('connection', (socket) => {
     const room = {
       code,
       hostId:           socket.id,
-      players:          [{ id: socket.id, name: playerName || 'Hôte', cards: 0, tokens: 0, isHost: true }],
+      players:          [{ id: socket.id, name: playerName || 'Hôte', cards: 0, tokens: 2, isHost: true }],
       gameStarted:      false,
       currentCard:      null,
       targetCards:      10,
@@ -189,7 +189,7 @@ io.on('connection', (socket) => {
     if (room.gameStarted) return cb({ success: false, error: 'Partie déjà commencée.' });
     if (room.players.find(p => p.id === socket.id)) return cb({ success: true, code, room });
 
-    room.players.push({ id: socket.id, name: playerName || `Joueur ${room.players.length + 1}`, cards: 0, tokens: 0, isHost: false });
+    room.players.push({ id: socket.id, name: playerName || `Joueur ${room.players.length + 1}`, cards: 0, tokens: 2, isHost: false });
     socket.join(code.toUpperCase());
     socket.data.roomCode = code.toUpperCase();
     io.to(code.toUpperCase()).emit('room-updated', room);
@@ -202,12 +202,28 @@ io.on('connection', (socket) => {
     if (!room || room.hostId !== socket.id) return;
     room.gameStarted = true;
     room.targetCards = targetCards || 10;
+
+    // Tire une carte initiale par joueur, remet les jetons à 2
+    const initialCards = [];
+    let lowestYear = Infinity;
+    let lowestYearIdx = 0;
+    for (let i = 0; i < room.players.length; i++) {
+      room.players[i].tokens = 2;
+      const card = await fetchCard();
+      initialCards.push({ playerId: room.players[i].id, card });
+      if ((card.year ?? 9999) < lowestYear) {
+        lowestYear = card.year ?? 9999;
+        lowestYearIdx = i;
+      }
+    }
+    room.currentGuesserIdx = lowestYearIdx;
+
     io.to(code).emit('game-started', room);
-    // Tire la première carte automatiquement
-    const card = await fetchCard();
-    room.currentCard = card;
-    const guesser = room.players[room.currentGuesserIdx % room.players.length];
-    io.to(code).emit('card-drawn', { card, guesserId: guesser?.id ?? null });
+    io.to(code).emit('initial-cards', {
+      cards: initialCards,
+      firstGuesserId: room.players[lowestYearIdx]?.id ?? null,
+    });
+    console.log(`Partie démarrée — Premier devinant: ${room.players[lowestYearIdx]?.name} (${lowestYear})`);
   });
 
   socket.on('draw-card', async ({ code, year }) => {
@@ -245,7 +261,7 @@ io.on('connection', (socket) => {
   socket.on('reset-scores', ({ code }) => {
     const room = rooms.get(code);
     if (!room || room.hostId !== socket.id) return;
-    room.players.forEach(p => { p.cards = 0; p.tokens = 0; });
+    room.players.forEach(p => { p.cards = 0; p.tokens = 2; });
     room.winnerId         = null;
     room.currentCard      = null;
     room.currentGuesserIdx = 0;
