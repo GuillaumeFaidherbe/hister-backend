@@ -62,10 +62,13 @@ async function fetchCard(targetYear) {
   const artist = pickArtistForYear(year);
 
   try {
-    const url  = `https://itunes.apple.com/search?term=${encodeURIComponent(artist)}&country=FR&media=music&entity=song&limit=50`;
+    const url  = `https://itunes.apple.com/search?term=${encodeURIComponent(artist)}&country=FR&media=music&entity=song&limit=50&lang=fr_fr`;
     const res  = await fetch(url);
     const data = await res.json();
-    const tracks = (data.results ?? []).filter(t => t.previewUrl && t.trackName);
+    const tracks = (data.results ?? []).filter(t =>
+      t.previewUrl && t.trackName &&
+      t.artistName?.toLowerCase().includes(artist.split(' ')[0].toLowerCase())
+    );
 
     if (tracks.length > 0) {
       console.log(`🎵 iTunes: ${artist} → ${tracks.length} titres`);
@@ -136,6 +139,7 @@ io.on('connection', (socket) => {
       winnerId:         null,
       currentGuesserIdx: 0,
       cardPlaced:        false,
+      placedPosition:    null,
       histerCallerId:    null,
     };
     rooms.set(code, room);
@@ -200,15 +204,16 @@ io.on('connection', (socket) => {
   });
 
   // Le devinant place sa carte sur sa frise
-  socket.on('place-card', ({ code }) => {
+  socket.on('place-card', ({ code, position }) => {
     const room = rooms.get(code);
     if (!room) return;
     const guesser = room.players[room.currentGuesserIdx % room.players.length];
     if (socket.id !== guesser?.id) return;
-    room.cardPlaced = true;
-    room.histerCallerId = null;
-    io.to(code).emit('card-placed', { guesserId: guesser.id });
-    console.log(`${guesser.name} a placé sa carte`);
+    room.cardPlaced      = true;
+    room.placedPosition  = position;
+    room.histerCallerId  = null;
+    io.to(code).emit('card-placed', { guesserId: guesser.id, position });
+    console.log(`${guesser.name} a placé sa carte à la position ${position}`);
   });
 
   // Un non-devinant dit "Hister !"
@@ -228,24 +233,20 @@ io.on('connection', (socket) => {
   socket.on('resolve-turn', ({ code, correct }) => {
     const room = rooms.get(code);
     if (!room || room.hostId !== socket.id) return;
-    const guesserIdx   = room.currentGuesserIdx % room.players.length;
-    const guesser      = room.players[guesserIdx];
-    const histerCaller = room.histerCallerId ? room.players.find(p => p.id === room.histerCallerId) : null;
+    const guesserIdx = room.currentGuesserIdx % room.players.length;
+    const guesser    = room.players[guesserIdx];
 
     if (correct) {
+      // Correct : la carte s'ajoute à la frise du devinant
       guesser.cards += 1;
-      if (room.currentCard) guesser.timeline.push(room.currentCard);
-      if (histerCaller) {
-        // Hister appelé mais placement correct → le callerPerd un jeton au devinant
-        histerCaller.tokens = Math.max(0, histerCaller.tokens - 1);
-        guesser.tokens += 1;
+      if (room.currentCard) {
+        // Insérer à la bonne position dans la frise triée
+        guesser.timeline.push(room.currentCard);
+        guesser.timeline.sort((a, b) => a.year - b.year);
       }
     } else {
-      if (histerCaller) {
-        // Hister appelé et placement faux → le caller gagne un jeton du devinant
-        histerCaller.tokens += 1;
-        guesser.tokens = Math.max(0, guesser.tokens - 1);
-      }
+      // Faux : le devinant perd un jeton
+      guesser.tokens = Math.max(0, guesser.tokens - 1);
     }
 
     if (guesser.cards >= room.targetCards) room.winnerId = guesser.id;
@@ -265,7 +266,8 @@ io.on('connection', (socket) => {
     if (!room || room.hostId !== socket.id) return;
     room.currentGuesserIdx = (room.currentGuesserIdx + 1) % room.players.length;
     room.currentCard   = null;
-    room.cardPlaced    = false;
+    room.cardPlaced     = false;
+    room.placedPosition = null;
     room.histerCallerId = null;
     const guesser = room.players[room.currentGuesserIdx];
     io.to(code).emit('turn-changed', { guesserId: guesser?.id ?? null });
@@ -291,6 +293,7 @@ io.on('connection', (socket) => {
     room.currentCard       = null;
     room.currentGuesserIdx = 0;
     room.cardPlaced        = false;
+    room.placedPosition    = null;
     room.histerCallerId    = null;
     const guesser = room.players[0];
     io.to(code).emit('scores-updated', { players: room.players, winnerId: null });
