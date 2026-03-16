@@ -129,12 +129,14 @@ io.on('connection', (socket) => {
     const room = {
       code,
       hostId:           socket.id,
-      players:          [{ id: socket.id, name: playerName || 'Hôte', cards: 0, tokens: 2, isHost: true }],
+      players:          [{ id: socket.id, name: playerName || 'Hôte', cards: 0, tokens: 2, isHost: true, timeline: [] }],
       gameStarted:      false,
       currentCard:      null,
       targetCards:      10,
       winnerId:         null,
       currentGuesserIdx: 0,
+      cardPlaced:        false,
+      histerCallerId:    null,
     };
     rooms.set(code, room);
     socket.join(code);
@@ -149,7 +151,7 @@ io.on('connection', (socket) => {
     if (room.gameStarted) return cb({ success: false, error: 'Partie déjà commencée.' });
     if (room.players.find(p => p.id === socket.id)) return cb({ success: true, code, room });
 
-    room.players.push({ id: socket.id, name: playerName || `Joueur ${room.players.length + 1}`, cards: 0, tokens: 2, isHost: false });
+    room.players.push({ id: socket.id, name: playerName || `Joueur ${room.players.length + 1}`, cards: 0, tokens: 2, isHost: false, timeline: [] });
     socket.join(code.toUpperCase());
     socket.data.roomCode = code.toUpperCase();
     io.to(code.toUpperCase()).emit('room-updated', room);
@@ -197,11 +199,74 @@ io.on('connection', (socket) => {
     console.log(`Carte: ${card.year} — ${card.title} (${card.artist}) | Devinant: ${guesser?.name}`);
   });
 
+  // Le devinant place sa carte sur sa frise
+  socket.on('place-card', ({ code }) => {
+    const room = rooms.get(code);
+    if (!room) return;
+    const guesser = room.players[room.currentGuesserIdx % room.players.length];
+    if (socket.id !== guesser?.id) return;
+    room.cardPlaced = true;
+    room.histerCallerId = null;
+    io.to(code).emit('card-placed', { guesserId: guesser.id });
+    console.log(`${guesser.name} a placé sa carte`);
+  });
+
+  // Un non-devinant dit "Hister !"
+  socket.on('call-hister', ({ code }) => {
+    const room = rooms.get(code);
+    if (!room || !room.cardPlaced) return;
+    const guesser = room.players[room.currentGuesserIdx % room.players.length];
+    if (socket.id === guesser?.id) return;
+    if (room.histerCallerId) return; // déjà appelé
+    room.histerCallerId = socket.id;
+    const caller = room.players.find(p => p.id === socket.id);
+    io.to(code).emit('hister-called', { callerId: socket.id, callerName: caller?.name ?? '?' });
+    console.log(`HISTER ! par ${caller?.name}`);
+  });
+
+  // L'hôte valide le résultat (correct ou non)
+  socket.on('resolve-turn', ({ code, correct }) => {
+    const room = rooms.get(code);
+    if (!room || room.hostId !== socket.id) return;
+    const guesserIdx   = room.currentGuesserIdx % room.players.length;
+    const guesser      = room.players[guesserIdx];
+    const histerCaller = room.histerCallerId ? room.players.find(p => p.id === room.histerCallerId) : null;
+
+    if (correct) {
+      guesser.cards += 1;
+      if (room.currentCard) guesser.timeline.push(room.currentCard);
+      if (histerCaller) {
+        // Hister appelé mais placement correct → le callerPerd un jeton au devinant
+        histerCaller.tokens = Math.max(0, histerCaller.tokens - 1);
+        guesser.tokens += 1;
+      }
+    } else {
+      if (histerCaller) {
+        // Hister appelé et placement faux → le caller gagne un jeton du devinant
+        histerCaller.tokens += 1;
+        guesser.tokens = Math.max(0, guesser.tokens - 1);
+      }
+    }
+
+    if (guesser.cards >= room.targetCards) room.winnerId = guesser.id;
+
+    io.to(code).emit('turn-resolved', {
+      correct,
+      players:        room.players,
+      winnerId:       room.winnerId,
+      guesserId:      guesser.id,
+      histerCallerId: room.histerCallerId,
+    });
+    console.log(`Tour résolu — ${correct ? '✅ Correct' : '❌ Faux'}`);
+  });
+
   socket.on('next-turn', ({ code }) => {
     const room = rooms.get(code);
     if (!room || room.hostId !== socket.id) return;
     room.currentGuesserIdx = (room.currentGuesserIdx + 1) % room.players.length;
-    room.currentCard = null;
+    room.currentCard   = null;
+    room.cardPlaced    = false;
+    room.histerCallerId = null;
     const guesser = room.players[room.currentGuesserIdx];
     io.to(code).emit('turn-changed', { guesserId: guesser?.id ?? null });
     console.log(`Tour suivant — Devinant: ${guesser?.name}`);
@@ -221,10 +286,12 @@ io.on('connection', (socket) => {
   socket.on('reset-scores', ({ code }) => {
     const room = rooms.get(code);
     if (!room || room.hostId !== socket.id) return;
-    room.players.forEach(p => { p.cards = 0; p.tokens = 2; });
-    room.winnerId         = null;
-    room.currentCard      = null;
+    room.players.forEach(p => { p.cards = 0; p.tokens = 2; p.timeline = []; });
+    room.winnerId          = null;
+    room.currentCard       = null;
     room.currentGuesserIdx = 0;
+    room.cardPlaced        = false;
+    room.histerCallerId    = null;
     const guesser = room.players[0];
     io.to(code).emit('scores-updated', { players: room.players, winnerId: null });
     io.to(code).emit('card-drawn', { card: null, guesserId: guesser?.id ?? null });
