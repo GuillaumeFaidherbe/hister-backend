@@ -168,12 +168,13 @@ io.on('connection', (socket) => {
     while (rooms.has(code)) code = generateCode();
     const room = {
       code,
-      hostId:      socket.id,
-      players:     [{ id: socket.id, name: playerName || 'Hôte', cards: 0, tokens: 0, isHost: true }],
-      gameStarted: false,
-      currentCard: null,
-      targetCards: 10,
-      winnerId:    null,
+      hostId:           socket.id,
+      players:          [{ id: socket.id, name: playerName || 'Hôte', cards: 0, tokens: 0, isHost: true }],
+      gameStarted:      false,
+      currentCard:      null,
+      targetCards:      10,
+      winnerId:         null,
+      currentGuesserIdx: 0,
     };
     rooms.set(code, room);
     socket.join(code);
@@ -209,8 +210,20 @@ io.on('connection', (socket) => {
     if (!room || room.hostId !== socket.id) return;
     const card = await fetchCard(year);
     room.currentCard = card;
-    io.to(code).emit('card-drawn', card);
-    console.log(`Carte: ${card.year} — ${card.title} (${card.artist})`);
+    const guesserIdx = room.currentGuesserIdx % room.players.length;
+    const guesser = room.players[guesserIdx];
+    io.to(code).emit('card-drawn', { card, guesserId: guesser?.id ?? null });
+    console.log(`Carte: ${card.year} — ${card.title} (${card.artist}) | Devinant: ${guesser?.name}`);
+  });
+
+  socket.on('next-turn', ({ code }) => {
+    const room = rooms.get(code);
+    if (!room || room.hostId !== socket.id) return;
+    room.currentGuesserIdx = (room.currentGuesserIdx + 1) % room.players.length;
+    room.currentCard = null;
+    const guesser = room.players[room.currentGuesserIdx];
+    io.to(code).emit('turn-changed', { guesserId: guesser?.id ?? null });
+    console.log(`Tour suivant — Devinant: ${guesser?.name}`);
   });
 
   socket.on('update-score', ({ code, playerId, cardDelta, tokenDelta }) => {
@@ -228,10 +241,12 @@ io.on('connection', (socket) => {
     const room = rooms.get(code);
     if (!room || room.hostId !== socket.id) return;
     room.players.forEach(p => { p.cards = 0; p.tokens = 0; });
-    room.winnerId    = null;
-    room.currentCard = null;
+    room.winnerId         = null;
+    room.currentCard      = null;
+    room.currentGuesserIdx = 0;
+    const guesser = room.players[0];
     io.to(code).emit('scores-updated', { players: room.players, winnerId: null });
-    io.to(code).emit('card-drawn', null);
+    io.to(code).emit('card-drawn', { card: null, guesserId: guesser?.id ?? null });
   });
 
   socket.on('disconnect', () => {
